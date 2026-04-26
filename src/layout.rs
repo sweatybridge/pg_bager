@@ -221,17 +221,21 @@ fn build_tabular_interactive_output(
         prefix.extend_from_slice(line.bytes);
     }
 
-    let mut rows = Vec::with_capacity(candidate_lines.len());
-    for (line_index, tokens) in candidate_lines {
+    let mut rows = Vec::with_capacity(last_candidate - first_candidate + 1);
+    for line_index in first_candidate..=last_candidate {
         let mut row = Vec::new();
-        rewrite_line(
-            &mut row,
-            lines[*line_index].bytes,
-            tokens,
-            mode,
-            protocol,
-            config,
-        )?;
+        if let Some(tokens) = candidate_tokens(candidate_lines, line_index) {
+            rewrite_line(
+                &mut row,
+                lines[line_index].bytes,
+                tokens,
+                mode,
+                protocol,
+                config,
+            )?;
+        } else {
+            row.extend_from_slice(lines[line_index].bytes);
+        }
         rows.push(row);
     }
 
@@ -254,50 +258,42 @@ fn build_expanded_interactive_output(
     config: &Config,
 ) -> io::Result<InteractiveOutput> {
     let mut prefix = Vec::new();
+    let first_candidate = candidate_lines[0].0;
+    let last_candidate = candidate_lines[candidate_lines.len() - 1].0;
+    let first_record_start = record_start_for(lines, first_candidate, 0);
+    let last_record_start = record_start_for(lines, last_candidate, first_record_start);
+    let last_record_end = next_record_start(lines, last_record_start + 1);
+
+    for line in &lines[..first_record_start] {
+        prefix.extend_from_slice(line.bytes);
+    }
+
     let mut rows = Vec::with_capacity(candidate_lines.len());
-    let mut consumed_until = 0usize;
-
-    for (line_index, tokens) in candidate_lines {
-        let row_start = (*line_index)
-            .checked_sub(1)
-            .and_then(|mut index| loop {
-                if lines[index]
-                    .content_without_newline()
-                    .starts_with(b"-[ RECORD")
-                {
-                    return Some(index);
-                }
-                if index == consumed_until {
-                    return None;
-                }
-                index -= 1;
-            })
-            .unwrap_or(*line_index);
-
-        if rows.is_empty() {
-            for line in &lines[..row_start] {
-                prefix.extend_from_slice(line.bytes);
-            }
-        }
+    let mut row_start = first_record_start;
+    while row_start < last_record_end {
+        let row_end = next_record_start(lines, row_start + 1).min(last_record_end);
 
         let mut row = Vec::new();
-        for line in &lines[row_start..*line_index] {
-            row.extend_from_slice(line.bytes);
+        for line_index in row_start..row_end {
+            if let Some(tokens) = candidate_tokens(candidate_lines, line_index) {
+                rewrite_line(
+                    &mut row,
+                    lines[line_index].bytes,
+                    tokens,
+                    Mode::Expanded,
+                    protocol,
+                    config,
+                )?;
+            } else {
+                row.extend_from_slice(lines[line_index].bytes);
+            }
         }
-        rewrite_line(
-            &mut row,
-            lines[*line_index].bytes,
-            tokens,
-            Mode::Expanded,
-            protocol,
-            config,
-        )?;
         rows.push(row);
-        consumed_until = *line_index + 1;
+        row_start = row_end;
     }
 
     let mut suffix = Vec::new();
-    for line in &lines[consumed_until..] {
+    for line in &lines[last_record_end..] {
         suffix.extend_from_slice(line.bytes);
     }
 
@@ -306,6 +302,36 @@ fn build_expanded_interactive_output(
         rows,
         suffix,
     })
+}
+
+fn candidate_tokens(
+    candidate_lines: &[(usize, Vec<scan::Token>)],
+    line_index: usize,
+) -> Option<&[scan::Token]> {
+    candidate_lines
+        .iter()
+        .find_map(|(candidate_index, tokens)| (*candidate_index == line_index).then_some(&**tokens))
+}
+
+fn record_start_for(lines: &[Line<'_>], line_index: usize, stop_at: usize) -> usize {
+    let mut index = line_index;
+    loop {
+        if is_record_start(lines[index]) || index == stop_at {
+            return index;
+        }
+        index -= 1;
+    }
+}
+
+fn next_record_start(lines: &[Line<'_>], start_at: usize) -> usize {
+    lines[start_at..]
+        .iter()
+        .position(|line| is_record_start(*line))
+        .map_or(lines.len(), |offset| start_at + offset)
+}
+
+fn is_record_start(line: Line<'_>) -> bool {
+    line.content_without_newline().starts_with(b"-[ RECORD")
 }
 
 fn write_aligned_placeholder(out: &mut Vec<u8>, width: usize) {
@@ -411,6 +437,24 @@ mod tests {
     }
 
     #[test]
+    fn keeps_non_image_tabular_rows_between_rewrites() {
+        let input = format!(
+            " thumbnail \n-----------\n {} \n text row \n {} \n(3 rows)\n",
+            png_hex(),
+            png_hex()
+        );
+        let processed = process(input.as_bytes(), Protocol::Kitty, &config()).unwrap();
+        let interactive = processed.interactive.as_ref().unwrap();
+
+        assert_eq!(interactive.rows.len(), 3);
+        assert_eq!(interactive.rows[1], b" text row \n");
+        assert!(String::from_utf8(processed.bytes.clone())
+            .unwrap()
+            .contains(" text row \n"));
+        assert_eq!(interactive.bytes(), processed.bytes);
+    }
+
+    #[test]
     fn rewrites_single_column_expanded() {
         let input = format!("-[ RECORD 1 ]-----\nthumbnail | {}\n", png_hex());
         let processed = process(input.as_bytes(), Protocol::ITerm2, &config()).unwrap();
@@ -438,6 +482,27 @@ mod tests {
         assert!(String::from_utf8(interactive.rows[1].clone())
             .unwrap()
             .starts_with("-[ RECORD 2 ]-----\nthumbnail | [img]\n"));
+        assert_eq!(interactive.bytes(), processed.bytes);
+    }
+
+    #[test]
+    fn keeps_non_image_expanded_records_between_rewrites() {
+        let input = format!(
+            "-[ RECORD 1 ]-----\nthumbnail | {}\n-[ RECORD 2 ]-----\nthumbnail | text row\n-[ RECORD 3 ]-----\nthumbnail | {}\n",
+            png_hex(),
+            png_hex()
+        );
+        let processed = process(input.as_bytes(), Protocol::ITerm2, &config()).unwrap();
+        let interactive = processed.interactive.as_ref().unwrap();
+
+        assert_eq!(interactive.rows.len(), 3);
+        assert_eq!(
+            interactive.rows[1],
+            b"-[ RECORD 2 ]-----\nthumbnail | text row\n"
+        );
+        assert!(String::from_utf8(processed.bytes.clone())
+            .unwrap()
+            .contains("-[ RECORD 2 ]-----\nthumbnail | text row\n"));
         assert_eq!(interactive.bytes(), processed.bytes);
     }
 
