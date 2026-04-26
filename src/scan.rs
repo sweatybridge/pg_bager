@@ -1,4 +1,6 @@
 pub const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+pub const GIF87A_MAGIC: &[u8] = b"GIF87a";
+pub const GIF89A_MAGIC: &[u8] = b"GIF89a";
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Token {
@@ -7,7 +9,7 @@ pub struct Token {
     pub decoded: Vec<u8>,
 }
 
-pub fn png_tokens(line: &[u8], max_token_bytes: usize) -> Result<Vec<Token>, ScanError> {
+pub fn image_tokens(line: &[u8], max_token_bytes: usize) -> Result<Vec<Token>, ScanError> {
     let mut tokens = Vec::new();
     let mut index = 0;
 
@@ -27,7 +29,7 @@ pub fn png_tokens(line: &[u8], max_token_bytes: usize) -> Result<Vec<Token>, Sca
             return Err(ScanError::TokenTooLarge);
         }
 
-        if let Some(decoded) = decode_hex_png_prefix(&line[start + 2..end]) {
+        if let Some(decoded) = decode_hex_image_prefix(&line[start + 2..end]) {
             tokens.push(Token {
                 start,
                 end,
@@ -40,8 +42,8 @@ pub fn png_tokens(line: &[u8], max_token_bytes: usize) -> Result<Vec<Token>, Sca
     Ok(tokens)
 }
 
-fn decode_hex_png_prefix(hex: &[u8]) -> Option<Vec<u8>> {
-    if hex.len() < PNG_MAGIC.len() * 2 || !hex.len().is_multiple_of(2) {
+fn decode_hex_image_prefix(hex: &[u8]) -> Option<Vec<u8>> {
+    if hex.len() < shortest_magic_len() * 2 || !hex.len().is_multiple_of(2) {
         return None;
     }
 
@@ -52,7 +54,17 @@ fn decode_hex_png_prefix(hex: &[u8]) -> Option<Vec<u8>> {
         decoded.push((high << 4) | low);
     }
 
-    decoded.starts_with(PNG_MAGIC).then_some(decoded)
+    is_supported_image(&decoded).then_some(decoded)
+}
+
+pub fn is_supported_image(decoded: &[u8]) -> bool {
+    decoded.starts_with(PNG_MAGIC)
+        || decoded.starts_with(GIF87A_MAGIC)
+        || decoded.starts_with(GIF89A_MAGIC)
+}
+
+fn shortest_magic_len() -> usize {
+    PNG_MAGIC.len().min(GIF87A_MAGIC.len())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,7 +87,7 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
-    use super::{png_tokens, ScanError, PNG_MAGIC};
+    use super::{image_tokens, ScanError, GIF89A_MAGIC, PNG_MAGIC};
 
     fn png_hex() -> String {
         let mut out = String::from("\\x");
@@ -88,20 +100,32 @@ mod tests {
     #[test]
     fn finds_png_token() {
         let line = format!("prefix {} suffix", png_hex());
-        let tokens = png_tokens(line.as_bytes(), 1024).unwrap();
+        let tokens = image_tokens(line.as_bytes(), 1024).unwrap();
         assert_eq!(tokens.len(), 1);
         assert_eq!(tokens[0].decoded, PNG_MAGIC);
     }
 
     #[test]
-    fn ignores_non_png_bytea() {
-        let tokens = png_tokens(br"\xdeadbeef", 1024).unwrap();
+    fn finds_gif_token() {
+        let mut hex = String::from("\\x");
+        for byte in GIF89A_MAGIC {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+
+        let tokens = image_tokens(hex.as_bytes(), 1024).unwrap();
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].decoded, GIF89A_MAGIC);
+    }
+
+    #[test]
+    fn ignores_non_image_bytea() {
+        let tokens = image_tokens(br"\xdeadbeef", 1024).unwrap();
         assert!(tokens.is_empty());
     }
 
     #[test]
     fn reports_large_token() {
-        let err = png_tokens(br"\x89504e470d0a1a0a", 8).unwrap_err();
+        let err = image_tokens(br"\x89504e470d0a1a0a", 8).unwrap_err();
         assert_eq!(err, ScanError::TokenTooLarge);
     }
 }

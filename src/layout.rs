@@ -42,7 +42,7 @@ pub fn process(input: &[u8], protocol: Protocol, config: &Config) -> io::Result<
             continue;
         }
 
-        match scan::png_tokens(line.bytes, config.max_row_bytes) {
+        match scan::image_tokens(line.bytes, config.max_row_bytes) {
             Ok(tokens) if !tokens.is_empty() => candidate_lines.push((line_index, tokens)),
             Ok(_) => {}
             Err(scan::ScanError::TokenTooLarge) => {
@@ -376,7 +376,12 @@ fn split_inclusive_lines(input: &[u8]) -> Vec<Line<'_>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{config::Config, layout::process, scan::PNG_MAGIC, term::Protocol};
+    use crate::{
+        config::Config,
+        layout::process,
+        scan::{GIF89A_MAGIC, PNG_MAGIC},
+        term::Protocol,
+    };
 
     fn config() -> Config {
         Config {
@@ -396,6 +401,14 @@ mod tests {
         out
     }
 
+    fn gif_hex() -> String {
+        let mut out = String::from("\\x");
+        for byte in GIF89A_MAGIC {
+            out.push_str(&format!("{byte:02x}"));
+        }
+        out
+    }
+
     #[test]
     fn rewrites_single_column_unaligned() {
         let input = format!("thumbnail\n{}\n(1 row)\n", png_hex());
@@ -403,6 +416,15 @@ mod tests {
         let text = String::from_utf8(processed.bytes).unwrap();
         assert!(processed.rewritten);
         assert!(text.contains("[img]\n\x1b_Gf=100,a=T;"));
+    }
+
+    #[test]
+    fn rewrites_gif_single_column_unaligned() {
+        let input = format!("thumbnail\n{}\n(1 row)\n", gif_hex());
+        let processed = process(input.as_bytes(), Protocol::ITerm2, &config()).unwrap();
+        let text = String::from_utf8(processed.bytes).unwrap();
+        assert!(processed.rewritten);
+        assert!(text.contains("[img]\n\x1b]1337;File=inline=1;size=6;"));
     }
 
     #[test]
