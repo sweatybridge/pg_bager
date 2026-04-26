@@ -1,6 +1,6 @@
 [package]
 name = "pg_bager"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A psql pager filter that renders PNG bytea cells as terminal images"
 license = "MIT"
@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64 = "0.22"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
