@@ -22,9 +22,6 @@ jobs:
 
       - name: Check Cargo.toml version tag
         id: version
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -50,15 +47,8 @@ jobs:
           current="v${version}"
           exists=false
 
-          if gh api "repos/${REPOSITORY}/git/ref/tags/${current}" >/dev/null 2>gh-api-error.log; then
+          if git ls-remote --exit-code --tags origin "refs/tags/${current}" >/dev/null; then
             exists=true
-          else
-            if grep -q "HTTP 404" gh-api-error.log; then
-              exists=false
-            else
-              cat gh-api-error.log >&2
-              exit 1
-            fi
           fi
 
           {
