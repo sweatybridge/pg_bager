@@ -27,6 +27,8 @@ jobs:
           echo "current=$version" >> "$GITHUB_OUTPUT"
           gh release view "v$version" || status=$?
           echo "changed=$status" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   build:
     name: Build ${{ matrix.target }}
