@@ -16,11 +16,11 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       current: ${{ steps.version.outputs.current }}
-      latest: ${{ steps.version.outputs.latest }}
+      exists: ${{ steps.version.outputs.exists }}
     steps:
       - uses: actions/checkout@v6
 
-      - name: Compare Cargo.toml version with latest release
+      - name: Check Cargo.toml version tag
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -48,11 +48,13 @@ jobs:
           fi
 
           current="v${version}"
-          latest=""
+          exists=false
 
-          if ! latest="$(gh api "repos/${REPOSITORY}/releases/latest" --jq .tag_name 2>gh-api-error.log)"; then
+          if gh api "repos/${REPOSITORY}/git/ref/tags/${current}" >/dev/null 2>gh-api-error.log; then
+            exists=true
+          else
             if grep -q "HTTP 404" gh-api-error.log; then
-              latest=""
+              exists=false
             else
               cat gh-api-error.log >&2
               exit 1
@@ -61,13 +63,13 @@ jobs:
 
           {
             echo "current=${current}"
-            echo "latest=${latest}"
+            echo "exists=${exists}"
           } >> "${GITHUB_OUTPUT}"
 
   build:
     name: Build ${{ matrix.target }}
     needs: version
-    if: needs.version.outputs.current != needs.version.outputs.latest
+    if: needs.version.outputs.exists != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -119,7 +121,7 @@ jobs:
     needs:
       - version
       - build
-    if: needs.version.outputs.current != needs.version.outputs.latest
+    if: needs.version.outputs.exists != 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
