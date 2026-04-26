@@ -28,42 +28,63 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPOSITORY: ${{ github.repository }}
         run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
-          import os
-          import tomllib
-          import urllib.error
-          import urllib.request
-          from pathlib import Path
+          set -euo pipefail
 
-          current = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
-          current_tag = f"v{current}"
-          repository = os.environ["REPOSITORY"]
-          token = os.environ["GH_TOKEN"]
-          latest_tag = ""
+          version="$(
+            awk '
+              /^\[package\]/ { in_package = 1; next }
+              /^\[/ && in_package { exit }
+              in_package && /^[[:space:]]*version[[:space:]]*=/ {
+                value = $0
+                sub(/^[^=]*=[[:space:]]*/, "", value)
+                gsub(/^[[:space:]]*"|"[[:space:]]*$/, "", value)
+                print value
+                exit
+              }
+            ' Cargo.toml
+          )"
 
-          request = urllib.request.Request(
-              f"https://api.github.com/repos/{repository}/releases/latest",
-              headers={
-                  "Accept": "application/vnd.github+json",
-                  "Authorization": f"Bearer {token}",
-                  "X-GitHub-Api-Version": "2022-11-28",
-              },
-          )
-          try:
-              with urllib.request.urlopen(request) as response:
-                  latest_tag = json.loads(response.read())["tag_name"]
-          except urllib.error.HTTPError as error:
-              if error.code != 404:
-                  raise
+          if [[ -z "${version}" ]]; then
+            echo "Unable to read package.version from Cargo.toml" >&2
+            exit 1
+          fi
 
-          changed = latest_tag != current_tag
+          current_tag="v${version}"
+          latest_tag=""
+          response="$(mktemp)"
 
-          print(f"changed={str(changed).lower()}")
-          print(f"version={current}")
-          print(f"tag={current_tag}")
-          print(f"latest_tag={latest_tag}")
-          PY
+          status="$(
+            curl --silent --show-error --location \
+              --output "${response}" \
+              --write-out "%{http_code}" \
+              --header "Accept: application/vnd.github+json" \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/${REPOSITORY}/releases/latest"
+          )"
+
+          if [[ "${status}" == "200" ]]; then
+            latest_tag="$(
+              sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${response}" |
+                head -n 1
+            )"
+          elif [[ "${status}" != "404" ]]; then
+            cat "${response}" >&2
+            echo "GitHub releases API returned HTTP ${status}" >&2
+            exit 1
+          fi
+
+          changed=false
+          if [[ "${latest_tag}" != "${current_tag}" ]]; then
+            changed=true
+          fi
+
+          {
+            echo "changed=${changed}"
+            echo "version=${version}"
+            echo "tag=${current_tag}"
+            echo "latest_tag=${latest_tag}"
+          } >> "${GITHUB_OUTPUT}"
 
   build:
     name: Build ${{ matrix.target }}
