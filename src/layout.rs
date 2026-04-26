@@ -222,19 +222,17 @@ fn build_tabular_interactive_output(
     }
 
     let mut rows = Vec::with_capacity(last_candidate - first_candidate + 1);
-    for line_index in first_candidate..=last_candidate {
+    for (line_index, line) in lines
+        .iter()
+        .enumerate()
+        .take(last_candidate + 1)
+        .skip(first_candidate)
+    {
         let mut row = Vec::new();
         if let Some(tokens) = candidate_tokens(candidate_lines, line_index) {
-            rewrite_line(
-                &mut row,
-                lines[line_index].bytes,
-                tokens,
-                mode,
-                protocol,
-                config,
-            )?;
+            rewrite_line(&mut row, line.bytes, tokens, mode, protocol, config)?;
         } else {
-            row.extend_from_slice(lines[line_index].bytes);
+            row.extend_from_slice(line.bytes);
         }
         rows.push(row);
     }
@@ -274,18 +272,18 @@ fn build_expanded_interactive_output(
         let row_end = next_record_start(lines, row_start + 1).min(last_record_end);
 
         let mut row = Vec::new();
-        for line_index in row_start..row_end {
+        for (line_index, line) in lines.iter().enumerate().take(row_end).skip(row_start) {
             if let Some(tokens) = candidate_tokens(candidate_lines, line_index) {
                 rewrite_line(
                     &mut row,
-                    lines[line_index].bytes,
+                    line.bytes,
                     tokens,
                     Mode::Expanded,
                     protocol,
                     config,
                 )?;
             } else {
-                row.extend_from_slice(lines[line_index].bytes);
+                row.extend_from_slice(line.bytes);
             }
         }
         rows.push(row);
