@@ -51,27 +51,14 @@ jobs:
 
           current_tag="v${version}"
           latest_tag=""
-          response="$(mktemp)"
 
-          status="$(
-            curl --silent --show-error --location \
-              --output "${response}" \
-              --write-out "%{http_code}" \
-              --header "Accept: application/vnd.github+json" \
-              --header "Authorization: Bearer ${GH_TOKEN}" \
-              --header "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${REPOSITORY}/releases/latest"
-          )"
-
-          if [[ "${status}" == "200" ]]; then
-            latest_tag="$(
-              sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${response}" |
-                head -n 1
-            )"
-          elif [[ "${status}" != "404" ]]; then
-            cat "${response}" >&2
-            echo "GitHub releases API returned HTTP ${status}" >&2
-            exit 1
+          if ! latest_tag="$(gh api "repos/${REPOSITORY}/releases/latest" --jq .tag_name 2>gh-api-error.log)"; then
+            if grep -q "HTTP 404" gh-api-error.log; then
+              latest_tag=""
+            else
+              cat gh-api-error.log >&2
+              exit 1
+            fi
           fi
 
           changed=false
