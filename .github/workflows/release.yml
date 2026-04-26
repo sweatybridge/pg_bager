@@ -20,27 +20,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: false
+
       - name: Check Cargo.toml version tag
         id: version
         run: |
           set -euo pipefail
 
           version="$(
-            awk '
-              /^\[package\]/ { in_package = 1; next }
-              /^\[/ && in_package { exit }
-              in_package && /^[[:space:]]*version[[:space:]]*=/ {
-                value = $0
-                sub(/^[^=]*=[[:space:]]*/, "", value)
-                gsub(/^[[:space:]]*"|"[[:space:]]*$/, "", value)
-                print value
-                exit
-              }
-            ' Cargo.toml
+            cargo metadata --no-deps --format-version 1 |
+              jq -r '.workspace_root as $root | .packages[] | select(.manifest_path == ($root + "/Cargo.toml")) | .version'
           )"
 
           if [[ -z "${version}" ]]; then
-            echo "Unable to read package.version from Cargo.toml" >&2
+            echo "Unable to read package.version from cargo metadata" >&2
             exit 1
           fi
 
