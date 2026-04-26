@@ -51,7 +51,9 @@ SELECT ffmpeg.thumbnail(pg_read_binary_file('/path/to/video.mp4'));
 
 `pg_bager` is a filter masquerading as a pager. For eligible single-column image
 output it writes directly to the terminal so the image escape can render
-reliably. It does not provide pager navigation, search, or `less`-style keys.
+reliably. It displays one rendered row at a time: use Down and Up to move
+between rows, and `q` to quit. It does not provide search or other `less`-style
+keys.
 
 Passthrough cases use:
 
