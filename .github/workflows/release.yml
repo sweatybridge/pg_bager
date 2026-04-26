@@ -96,7 +96,7 @@ jobs:
           tar -czf "dist/${asset}.tar.gz" -C dist "${asset}"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pg_bager-${{ needs.version.outputs.current }}-${{ matrix.target }}
           path: dist/*.tar.gz
@@ -111,13 +111,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.current }}
           name: ${{ needs.version.outputs.current }}
