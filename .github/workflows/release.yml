@@ -56,20 +56,17 @@ jobs:
     name: Build ${{ matrix.target }}
     needs: version
     if: needs.version.outputs.exists != 'true'
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+          - target: x86_64-unknown-linux-musl
             binary: pg_bager
-          - os: macos-13
-            target: x86_64-apple-darwin
+          - target: aarch64-unknown-linux-musl
             binary: pg_bager
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            binary: pg_bager.exe
+          - target: armv7-unknown-linux-musleabihf
+            binary: pg_bager
     steps:
       - uses: actions/checkout@v6
 
@@ -79,8 +76,13 @@ jobs:
           target: ${{ matrix.target }}
           cache-key: release-${{ matrix.target }}
 
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: cross build --release --locked --target ${{ matrix.target }}
 
       - name: Package binary
         shell: bash
