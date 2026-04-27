@@ -1,16 +1,21 @@
 use std::{
     io::{self, Cursor, Write},
     sync::atomic::{AtomicU32, Ordering},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{codecs::gif::GifDecoder, AnimationDecoder};
+use image::{codecs::gif::GifDecoder, AnimationDecoder, ImageDecoder, Limits};
 
 use crate::{config::Config, term::Protocol};
 
 const KITTY_CHUNK_BYTES: usize = 4096;
 const DEFAULT_GIF_FRAME_DELAY_MS: i32 = 40;
-static NEXT_KITTY_IMAGE_ID: AtomicU32 = AtomicU32::new(1);
+const KITTY_GIF_MAX_FRAMES: usize = 256;
+const KITTY_GIF_MAX_DIMENSION: u32 = 8192;
+const KITTY_GIF_MAX_DECODER_ALLOC_BYTES: u64 = 64 * 1024 * 1024;
+const KITTY_GIF_MAX_TOTAL_RGBA_BYTES: u64 = 128 * 1024 * 1024;
+static NEXT_KITTY_IMAGE_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 pub fn write(
     out: &mut dyn Write,
@@ -75,50 +80,72 @@ fn kitty_png(out: &mut Vec<u8>, decoded: &[u8], config: &Config) -> io::Result<(
 }
 
 fn kitty_gif(out: &mut Vec<u8>, decoded: &[u8], config: &Config) -> io::Result<()> {
-    let frames = match decode_gif_frames(decoded) {
-        Ok(frames) => frames,
+    let stats = match gif_animation_stats(decoded, config) {
+        Ok(stats) => stats,
         Err(_) => return Ok(()),
     };
-    if frames.is_empty() {
+    if stats.frame_count == 0 {
         return Ok(());
     }
 
-    let image_id = NEXT_KITTY_IMAGE_ID.fetch_add(1, Ordering::Relaxed);
-    let first = &frames[0];
-    kitty_rgba(
-        out,
-        first.rgba.as_slice(),
-        KittyRgbaMetadata {
-            action: "T",
-            image_id: Some(image_id),
-            width: first.width,
-            height: first.height,
-            frame_delay_ms: None,
-            config,
-        },
-    )?;
-    write!(out, "\x1b_Ga=a,i={image_id},r=1,z={}\x1b\\", first.delay_ms)?;
+    let image_id = next_kitty_image_id();
+    let mut frame_index = 0usize;
+    for_each_gif_frame(decoded, config, |frame| {
+        if frame_index == 0 {
+            kitty_rgba(
+                out,
+                frame.rgba.as_slice(),
+                KittyRgbaMetadata {
+                    action: "T",
+                    image_id: Some(image_id),
+                    width: frame.width,
+                    height: frame.height,
+                    frame_delay_ms: None,
+                    config,
+                },
+            )?;
+            write!(out, "\x1b_Ga=a,i={image_id},r=1,z={}\x1b\\", frame.delay_ms)?;
+        } else {
+            kitty_rgba(
+                out,
+                frame.rgba.as_slice(),
+                KittyRgbaMetadata {
+                    action: "f",
+                    image_id: Some(image_id),
+                    width: frame.width,
+                    height: frame.height,
+                    frame_delay_ms: Some(frame.delay_ms),
+                    config,
+                },
+            )?;
+        }
 
-    for frame in &frames[1..] {
-        kitty_rgba(
-            out,
-            frame.rgba.as_slice(),
-            KittyRgbaMetadata {
-                action: "f",
-                image_id: Some(image_id),
-                width: frame.width,
-                height: frame.height,
-                frame_delay_ms: Some(frame.delay_ms),
-                config,
-            },
-        )?;
-    }
+        frame_index += 1;
+        Ok(())
+    })?;
 
-    if frames.len() > 1 {
+    if stats.frame_count > 1 {
         write!(out, "\x1b_Ga=a,i={image_id},s=3,v=1\x1b\\")?;
     }
 
     Ok(())
+}
+
+fn next_kitty_image_id() -> u32 {
+    let counter = NEXT_KITTY_IMAGE_COUNTER
+        .fetch_add(1, Ordering::Relaxed)
+        .wrapping_add(1);
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let mixed = (nanos as u32)
+        ^ ((nanos >> 32) as u32).rotate_left(7)
+        ^ pid.rotate_left(13)
+        ^ counter.rotate_left(23);
+
+    (mixed & 0x3fff_ffff) | 0x4000_0000
 }
 
 struct KittyRgbaMetadata<'a> {
@@ -172,6 +199,11 @@ fn kitty_rgba(out: &mut Vec<u8>, rgba: &[u8], metadata: KittyRgbaMetadata<'_>) -
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GifAnimationStats {
+    frame_count: usize,
+}
+
 #[derive(Clone, Debug)]
 struct GifFrame {
     width: u32,
@@ -180,26 +212,70 @@ struct GifFrame {
     rgba: Vec<u8>,
 }
 
-fn decode_gif_frames(decoded: &[u8]) -> io::Result<Vec<GifFrame>> {
-    let decoder = GifDecoder::new(Cursor::new(decoded)).map_err(invalid_image)?;
-    let frames = decoder
-        .into_frames()
-        .collect_frames()
-        .map_err(invalid_image)?;
-    Ok(frames
-        .into_iter()
-        .map(|frame| {
-            let delay_ms = frame_delay_ms(&frame);
-            let buffer = frame.into_buffer();
-            let (width, height) = buffer.dimensions();
-            GifFrame {
-                width,
-                height,
-                delay_ms,
-                rgba: buffer.into_raw(),
-            }
-        })
-        .collect())
+fn gif_animation_stats(decoded: &[u8], config: &Config) -> io::Result<GifAnimationStats> {
+    let mut frame_count = 0;
+    for_each_gif_frame(decoded, config, |_| {
+        frame_count += 1;
+        Ok(())
+    })?;
+    Ok(GifAnimationStats { frame_count })
+}
+
+fn for_each_gif_frame(
+    decoded: &[u8],
+    config: &Config,
+    mut on_frame: impl FnMut(GifFrame) -> io::Result<()>,
+) -> io::Result<()> {
+    let decoder = limited_gif_decoder(decoded, config)?;
+    let mut total_rgba_bytes = 0u64;
+
+    for (index, frame) in decoder.into_frames().enumerate() {
+        if index >= KITTY_GIF_MAX_FRAMES {
+            return Err(gif_limit_error("gif has too many frames"));
+        }
+
+        let frame = frame.map_err(invalid_image)?;
+        let delay_ms = frame_delay_ms(&frame);
+        let buffer = frame.into_buffer();
+        let (width, height) = buffer.dimensions();
+        let rgba = buffer.into_raw();
+        let frame_bytes =
+            u64::try_from(rgba.len()).map_err(|_| gif_limit_error("gif frame is too large"))?;
+        total_rgba_bytes = total_rgba_bytes
+            .checked_add(frame_bytes)
+            .ok_or_else(|| gif_limit_error("gif animation is too large"))?;
+        if total_rgba_bytes > KITTY_GIF_MAX_TOTAL_RGBA_BYTES {
+            return Err(gif_limit_error("gif animation is too large"));
+        }
+
+        on_frame(GifFrame {
+            width,
+            height,
+            delay_ms,
+            rgba,
+        })?;
+    }
+
+    Ok(())
+}
+
+fn limited_gif_decoder<'a>(
+    decoded: &'a [u8],
+    config: &Config,
+) -> io::Result<GifDecoder<Cursor<&'a [u8]>>> {
+    let mut decoder = GifDecoder::new(Cursor::new(decoded)).map_err(invalid_image)?;
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(KITTY_GIF_MAX_DIMENSION);
+    limits.max_image_height = Some(KITTY_GIF_MAX_DIMENSION);
+    limits.max_alloc = Some(KITTY_GIF_MAX_DECODER_ALLOC_BYTES);
+    if let Some(width) = config.max_pixels_w {
+        limits.max_image_width = Some(width.max(KITTY_GIF_MAX_DIMENSION));
+    }
+    if let Some(height) = config.max_pixels_h {
+        limits.max_image_height = Some(height.max(KITTY_GIF_MAX_DIMENSION));
+    }
+    decoder.set_limits(limits).map_err(invalid_image)?;
+    Ok(decoder)
 }
 
 fn frame_delay_ms(frame: &image::Frame) -> i32 {
@@ -217,6 +293,10 @@ fn frame_delay_ms(frame: &image::Frame) -> i32 {
 
 fn invalid_image(error: image::ImageError) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn gif_limit_error(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
 fn write_kitty_size(out: &mut Vec<u8>, config: &Config) -> io::Result<()> {
@@ -248,7 +328,7 @@ fn iterm2(out: &mut Vec<u8>, decoded: &[u8], config: &Config) -> io::Result<()> 
 
 #[cfg(test)]
 mod tests {
-    use super::write;
+    use super::{write, KITTY_GIF_MAX_FRAMES};
     use crate::{config::Config, term::Protocol};
 
     fn config() -> Config {
@@ -262,6 +342,10 @@ mod tests {
     }
 
     fn animated_gif() -> Vec<u8> {
+        animated_gif_frames(2)
+    }
+
+    fn animated_gif_frames(frame_count: usize) -> Vec<u8> {
         let mut bytes = Vec::new();
         {
             let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
@@ -269,23 +353,30 @@ mod tests {
                 .set_repeat(image::codecs::gif::Repeat::Infinite)
                 .unwrap();
 
-            let first = image::Frame::from_parts(
-                image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255])),
-                0,
-                0,
-                image::Delay::from_numer_denom_ms(10, 1),
-            );
-            let second = image::Frame::from_parts(
-                image::RgbaImage::from_pixel(1, 1, image::Rgba([0, 0, 255, 255])),
-                0,
-                0,
-                image::Delay::from_numer_denom_ms(20, 1),
-            );
-
-            encoder.encode_frame(first).unwrap();
-            encoder.encode_frame(second).unwrap();
+            for index in 0..frame_count {
+                let color = if index % 2 == 0 {
+                    image::Rgba([255, 0, 0, 255])
+                } else {
+                    image::Rgba([0, 0, 255, 255])
+                };
+                let frame = image::Frame::from_parts(
+                    image::RgbaImage::from_pixel(1, 1, color),
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(10 * (index as u32 + 1), 1),
+                );
+                encoder.encode_frame(frame).unwrap();
+            }
         }
         bytes
+    }
+
+    fn first_kitty_image_id(output: &str) -> u32 {
+        let start = output.find(",i=").unwrap() + 3;
+        let end = output[start..]
+            .find(|byte: char| !byte.is_ascii_digit())
+            .map_or(output.len(), |offset| start + offset);
+        output[start..end].parse().unwrap()
     }
 
     #[test]
@@ -328,6 +419,29 @@ mod tests {
         assert!(text.contains("\x1b_Ga=f,f=32,s=1,v=1,i="));
         assert!(text.contains(",z=20;"));
         assert!(text.contains(",s=3,v=1\x1b\\"));
+    }
+
+    #[test]
+    fn kitty_gif_ids_do_not_restart_at_one() {
+        let gif = animated_gif();
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        write(&mut first, Protocol::Kitty, "orig", &gif, &config()).unwrap();
+        write(&mut second, Protocol::Kitty, "orig", &gif, &config()).unwrap();
+
+        let first_id = first_kitty_image_id(&String::from_utf8(first).unwrap());
+        let second_id = first_kitty_image_id(&String::from_utf8(second).unwrap());
+        assert_ne!(first_id, 1);
+        assert_ne!(second_id, 1);
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
+    fn kitty_gif_over_frame_limit_writes_original() {
+        let gif = animated_gif_frames(KITTY_GIF_MAX_FRAMES + 1);
+        let mut out = Vec::new();
+        write(&mut out, Protocol::Kitty, "orig", &gif, &config()).unwrap();
+        assert_eq!(out, b"orig");
     }
 
     #[test]
