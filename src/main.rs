@@ -6,10 +6,17 @@ mod term;
 
 use std::{
     env,
-    fs::{File, OpenOptions},
     io::{self, Read, Write},
-    os::fd::AsRawFd,
     process::{Command, Stdio},
+};
+
+#[cfg(windows)]
+use std::path::Path;
+
+#[cfg(unix)]
+use std::{
+    fs::{File, OpenOptions},
+    os::fd::AsRawFd,
 };
 
 use config::Config;
@@ -51,6 +58,7 @@ fn run() -> io::Result<()> {
     }
 }
 
+#[cfg(unix)]
 fn run_interactive(output: &layout::InteractiveOutput, protocol: term::Protocol) -> io::Result<()> {
     if output.rows.is_empty() {
         return Ok(());
@@ -75,6 +83,18 @@ fn run_interactive(output: &layout::InteractiveOutput, protocol: term::Protocol)
     }
 }
 
+#[cfg(not(unix))]
+fn run_interactive(
+    _output: &layout::InteractiveOutput,
+    _protocol: term::Protocol,
+) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "interactive pager mode requires a Unix tty",
+    ))
+}
+
+#[cfg(unix)]
 fn render_interactive_row(
     stdout: &mut impl Write,
     output: &layout::InteractiveOutput,
@@ -97,6 +117,7 @@ fn render_interactive_row(
     stdout.flush()
 }
 
+#[cfg(unix)]
 fn clear_screen(stdout: &mut impl Write, protocol: term::Protocol) -> io::Result<()> {
     if protocol == term::Protocol::Kitty {
         stdout.write_all(b"\x1b_Ga=d,d=A\x1b\\")?;
@@ -104,6 +125,7 @@ fn clear_screen(stdout: &mut impl Write, protocol: term::Protocol) -> io::Result
     stdout.write_all(b"\x1b[2J\x1b[H")
 }
 
+#[cfg(unix)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Key {
     Up,
@@ -112,11 +134,13 @@ enum Key {
     Other,
 }
 
+#[cfg(unix)]
 struct RawTty {
     tty: File,
     original: libc::termios,
 }
 
+#[cfg(unix)]
 impl RawTty {
     fn open() -> io::Result<Self> {
         let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
@@ -178,6 +202,7 @@ impl RawTty {
     }
 }
 
+#[cfg(unix)]
 impl Drop for RawTty {
     fn drop(&mut self) {
         let _ = unsafe {
@@ -190,6 +215,7 @@ impl Drop for RawTty {
     }
 }
 
+#[cfg(unix)]
 fn tcgetattr(fd: i32) -> io::Result<libc::termios> {
     let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
     let result = unsafe { libc::tcgetattr(fd, termios.as_mut_ptr()) };
@@ -200,6 +226,7 @@ fn tcgetattr(fd: i32) -> io::Result<libc::termios> {
     }
 }
 
+#[cfg(unix)]
 fn tcsetattr(fd: i32, termios: &libc::termios) -> io::Result<()> {
     let result = unsafe { libc::tcsetattr(fd, libc::TCSANOW, termios as *const libc::termios) };
     if result == 0 {
@@ -216,6 +243,8 @@ fn default_pager_command() -> String {
         .unwrap_or_else(|| {
             if command_exists("less") {
                 "less -R".to_string()
+            } else if cfg!(windows) {
+                "more".to_string()
             } else {
                 "cat".to_string()
             }
@@ -223,20 +252,39 @@ fn default_pager_command() -> String {
 }
 
 fn command_exists(name: &str) -> bool {
+    #[cfg(windows)]
+    let has_extension = Path::new(name).extension().is_some();
+
     env::var_os("PATH").is_some_and(|paths| {
         env::split_paths(&paths).any(|path| {
             let candidate = path.join(name);
-            candidate.is_file()
+            if candidate.is_file() {
+                return true;
+            }
+
+            #[cfg(windows)]
+            {
+                if has_extension {
+                    return false;
+                }
+
+                let extensions =
+                    env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+                extensions.split(';').any(|extension| {
+                    !extension.is_empty() && path.join(format!("{name}{extension}")).is_file()
+                })
+            }
+
+            #[cfg(not(windows))]
+            {
+                false
+            }
         })
     })
 }
 
 fn write_to_pager(command: &str, bytes: &[u8]) -> io::Result<()> {
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .stdin(Stdio::piped())
-        .spawn()?;
+    let mut child = pager_shell(command).stdin(Stdio::piped()).spawn()?;
 
     {
         let mut stdin = child
@@ -256,6 +304,20 @@ fn write_to_pager(command: &str, bytes: &[u8]) -> io::Result<()> {
     }
 }
 
+#[cfg(windows)]
+fn pager_shell(command: &str) -> Command {
+    let mut shell = Command::new("powershell");
+    shell.arg("-NoProfile").arg("-Command").arg(command);
+    shell
+}
+
+#[cfg(not(windows))]
+fn pager_shell(command: &str) -> Command {
+    let mut shell = Command::new("sh");
+    shell.arg("-c").arg(command);
+    shell
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -265,14 +327,23 @@ mod tests {
 
     #[test]
     fn finds_shell() {
-        assert!(command_exists("sh"));
+        if cfg!(windows) {
+            assert!(command_exists("cmd"));
+        } else {
+            assert!(command_exists("sh"));
+        }
     }
 
     #[test]
     fn fallback_command_receives_rewritten_stream() {
         let dir = tempfile::tempdir().unwrap();
         let output_path = dir.path().join("pager.out");
-        let command = format!("cat > {}", output_path.display());
+        let command = if cfg!(windows) {
+            let output_path = output_path.display().to_string().replace('\'', "''");
+            format!("[Console]::OpenStandardInput().CopyTo([IO.File]::Create('{output_path}'))")
+        } else {
+            format!("cat > {}", output_path.display())
+        };
 
         let mut input = String::from("thumbnail\n\\x");
         for byte in PNG_MAGIC {

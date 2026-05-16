@@ -4,6 +4,7 @@ use std::env;
 pub enum Protocol {
     Kitty,
     ITerm2,
+    Sixel,
     None,
 }
 
@@ -24,6 +25,7 @@ pub fn detect_from<'a>(vars: impl IntoIterator<Item = (&'a str, &'a str)>) -> Pr
         return match *value {
             "kitty" => Protocol::Kitty,
             "iterm2" => Protocol::ITerm2,
+            "sixel" => Protocol::Sixel,
             "none" => Protocol::None,
             _ => Protocol::None,
         };
@@ -45,6 +47,10 @@ pub fn detect_from<'a>(vars: impl IntoIterator<Item = (&'a str, &'a str)>) -> Pr
         return Protocol::ITerm2;
     }
 
+    if get("WT_SESSION").is_some() {
+        return Protocol::Sixel;
+    }
+
     Protocol::None
 }
 
@@ -62,6 +68,10 @@ mod tests {
             detect_from([("PG_BAGER_PROTOCOL", "none"), ("TERM", "xterm-kitty")]),
             Protocol::None
         );
+        assert_eq!(
+            detect_from([("PG_BAGER_PROTOCOL", "sixel"), ("TERM", "xterm-kitty")]),
+            Protocol::Sixel
+        );
     }
 
     #[test]
@@ -77,6 +87,11 @@ mod tests {
             detect_from([("TERM_PROGRAM", "iTerm.app")]),
             Protocol::ITerm2
         );
+    }
+
+    #[test]
+    fn detects_windows_terminal() {
+        assert_eq!(detect_from([("WT_SESSION", "id")]), Protocol::Sixel);
     }
 
     #[test]

@@ -6,8 +6,10 @@ cells inline in terminals that support image escape sequences.
 It is intentionally narrow in v1:
 
 - PNG and GIF `bytea` output only. Animated GIFs render in terminals that
-  support the selected image protocol's animation features.
-- Kitty graphics protocol and iTerm2 inline images.
+  support the selected image protocol's animation features; Sixel renders the
+  first frame.
+- Kitty graphics protocol, iTerm2 inline images, and Sixel for Windows
+  Terminal.
 - Single-column `psql` result rows only, in aligned, unaligned, or expanded
   display modes.
 - Multi-column, unsupported, disabled, or oversized output is passed through to
@@ -61,7 +63,7 @@ Passthrough cases use:
 1. `PG_BAGER_FALLBACK`, if set.
 2. `$PAGER`, if set.
 3. `less -R`, when `less` is available.
-4. `cat`.
+4. `more` on Windows, otherwise `cat`.
 
 Set `PG_BAGER_FALLBACK` to force a chained pager command for all output,
 including rewritten image output:
@@ -83,7 +85,7 @@ single-column inline images.
 
 | Variable | Description |
 | --- | --- |
-| `PG_BAGER_PROTOCOL=kitty\|iterm2\|none` | Explicit terminal protocol override. |
+| `PG_BAGER_PROTOCOL=kitty\|iterm2\|sixel\|none` | Explicit terminal protocol override. |
 | `PG_BAGER_DISABLE=1` | Disable rewriting and pass through unchanged. |
 | `PG_BAGER_FALLBACK='<command>'` | Pager command used for all output. |
 | `PG_BAGER_MAX_ROW_BYTES=<n>` | Physical row/token cap. Defaults to PostgreSQL's approximate maximum TOAST-able datum size, 1 GiB. |
@@ -94,6 +96,7 @@ Without `PG_BAGER_PROTOCOL`, detection is environment-only:
 
 - Kitty: `TERM=xterm-kitty`, `KITTY_WINDOW_ID` set, or `TERM_PROGRAM=WezTerm`.
 - iTerm2: `TERM_PROGRAM=iTerm.app`.
+- Windows Terminal 1.22 or newer: `WT_SESSION` set, using Sixel.
 - Otherwise: no image protocol.
 
 There is no terminal probing in v1.
@@ -103,5 +106,5 @@ There is no terminal probing in v1.
 Multi-column output is never rewritten. It is passed byte-for-byte to the
 fallback pager path.
 
-JPEG, WebP, Sixel, automatic terminal probing, and calls back into PostgreSQL
-or FFmpeg are out of scope for v1.
+JPEG, WebP, automatic terminal probing, and calls back into PostgreSQL or
+FFmpeg are out of scope for v1.
