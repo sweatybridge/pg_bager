@@ -66,6 +66,17 @@ fn run_interactive(output: &layout::InteractiveOutput, protocol: term::Protocol)
 
     let mut tty = RawTty::open()?;
     let mut stdout = io::stdout().lock();
+
+    // Write only the static prefix and suffix.  Image rows are rendered
+    // on-demand during navigation so the terminal does not render every
+    // image escape sequence at once.
+    stdout.write_all(&output.prefix)?;
+    stdout.write_all(&output.suffix)?;
+    if !output.suffix.ends_with(b"\n") {
+        stdout.write_all(b"\n")?;
+    }
+    stdout.flush()?;
+
     let mut row_index = 0usize;
 
     loop {
