@@ -1,11 +1,12 @@
 # pg_bager
 
-`pg_bager` is a small `psql` pager filter for rendering PNG-shaped `bytea`
+`pg_bager` is a small `psql` pager filter for rendering image-shaped `bytea`
 cells inline in terminals that support image escape sequences.
 
 It is intentionally narrow in v1:
 
-- PNG `bytea` output only.
+- PNG and GIF `bytea` output only. Animated GIFs render in terminals that
+  support the selected image protocol's animation features.
 - Kitty graphics protocol and iTerm2 inline images.
 - Single-column `psql` result rows only, in aligned, unaligned, or expanded
   display modes.
@@ -102,5 +103,5 @@ There is no terminal probing in v1.
 Multi-column output is never rewritten. It is passed byte-for-byte to the
 fallback pager path.
 
-JPEG, GIF, WebP, Sixel, automatic terminal probing, and calls back into
-PostgreSQL or FFmpeg are out of scope for v1.
+JPEG, WebP, Sixel, automatic terminal probing, and calls back into PostgreSQL
+or FFmpeg are out of scope for v1.
