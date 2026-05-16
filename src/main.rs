@@ -7,9 +7,11 @@ mod term;
 use std::{
     env,
     io::{self, Read, Write},
-    path::Path,
     process::{Command, Stdio},
 };
+
+#[cfg(windows)]
+use std::path::Path;
 
 #[cfg(unix)]
 use std::{
@@ -250,6 +252,7 @@ fn default_pager_command() -> String {
 }
 
 fn command_exists(name: &str) -> bool {
+    #[cfg(windows)]
     let has_extension = Path::new(name).extension().is_some();
 
     env::var_os("PATH").is_some_and(|paths| {
