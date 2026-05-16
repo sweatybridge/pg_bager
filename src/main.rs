@@ -265,11 +265,11 @@ fn command_exists(name: &str) -> bool {
                     return false;
                 }
 
-                let extensions = env::var("PATHEXT")
-                    .unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
-                return extensions.split(';').any(|extension| {
+                let extensions =
+                    env::var("PATHEXT").unwrap_or_else(|_| ".COM;.EXE;.BAT;.CMD".to_string());
+                extensions.split(';').any(|extension| {
                     !extension.is_empty() && path.join(format!("{name}{extension}")).is_file()
-                });
+                })
             }
 
             #[cfg(not(windows))]
@@ -337,9 +337,7 @@ mod tests {
         let output_path = dir.path().join("pager.out");
         let command = if cfg!(windows) {
             let output_path = output_path.display().to_string().replace('\'', "''");
-            format!(
-                "[Console]::OpenStandardInput().CopyTo([IO.File]::Create('{output_path}'))"
-            )
+            format!("[Console]::OpenStandardInput().CopyTo([IO.File]::Create('{output_path}'))")
         } else {
             format!("cat > {}", output_path.display())
         };

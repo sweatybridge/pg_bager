@@ -539,7 +539,7 @@ mod tests {
 
     fn red_png(width: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
-        let pixels = vec![255, 0, 0, 255].repeat(width as usize);
+        let pixels = [255, 0, 0, 255].repeat(width as usize);
         let encoder = image::codecs::png::PngEncoder::new(&mut bytes);
         encoder
             .write_image(&pixels, width, 1, image::ExtendedColorType::Rgba8)
