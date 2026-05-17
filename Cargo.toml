@@ -1,6 +1,6 @@
 [package]
 name = "pg_bager"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 description = "A psql pager filter that renders PNG bytea cells as terminal images"
 license = "MIT"
@@ -13,6 +13,9 @@ path = "src/main.rs"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["gif", "png"] }
 libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
 [dev-dependencies]
 tempfile = "3"
