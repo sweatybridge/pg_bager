@@ -11,12 +11,25 @@ use std::{
 };
 
 #[cfg(windows)]
-use std::path::Path;
+use std::{
+    fs::{File, OpenOptions},
+    os::windows::io::AsRawHandle,
+    path::Path,
+};
 
 #[cfg(unix)]
 use std::{
     fs::{File, OpenOptions},
     os::fd::AsRawFd,
+};
+
+#[cfg(windows)]
+use windows_sys::Win32::{
+    Foundation::HANDLE,
+    System::Console::{
+        GetConsoleMode, ReadConsoleInputW, SetConsoleMode, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+        INPUT_RECORD, KEY_EVENT,
+    },
 };
 
 use config::Config;
@@ -58,7 +71,7 @@ fn run() -> io::Result<()> {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn run_interactive(output: &layout::InteractiveOutput, protocol: term::Protocol) -> io::Result<()> {
     if output.rows.is_empty() {
         return Ok(());
@@ -94,18 +107,18 @@ fn run_interactive(output: &layout::InteractiveOutput, protocol: term::Protocol)
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn run_interactive(
     _output: &layout::InteractiveOutput,
     _protocol: term::Protocol,
 ) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "interactive pager mode requires a Unix tty",
+        "interactive pager mode requires a terminal tty",
     ))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn render_interactive_row(
     stdout: &mut impl Write,
     output: &layout::InteractiveOutput,
@@ -128,7 +141,7 @@ fn render_interactive_row(
     stdout.flush()
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn clear_screen(stdout: &mut impl Write, protocol: term::Protocol) -> io::Result<()> {
     if protocol == term::Protocol::Kitty {
         stdout.write_all(b"\x1b_Ga=d,d=A\x1b\\")?;
@@ -136,7 +149,7 @@ fn clear_screen(stdout: &mut impl Write, protocol: term::Protocol) -> io::Result
     stdout.write_all(b"\x1b[2J\x1b[H")
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Key {
     Up,
@@ -145,10 +158,83 @@ enum Key {
     Other,
 }
 
+#[cfg(windows)]
+const VK_UP: u16 = 0x26;
+#[cfg(windows)]
+const VK_DOWN: u16 = 0x28;
+
 #[cfg(unix)]
 struct RawTty {
     tty: File,
     original: libc::termios,
+}
+
+#[cfg(windows)]
+struct RawTty {
+    tty: File,
+    original: u32,
+}
+
+#[cfg(windows)]
+impl RawTty {
+    fn open() -> io::Result<Self> {
+        // stdin carries psql's pager payload; CONIN$ is the controlling
+        // console used for interactive navigation keys.
+        let tty = OpenOptions::new().read(true).write(true).open("CONIN$")?;
+        let handle = tty.as_raw_handle() as HANDLE;
+        let mut original = 0;
+        if unsafe { GetConsoleMode(handle, &mut original) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        let raw = original & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT);
+        if unsafe { SetConsoleMode(handle, raw) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(Self { tty, original })
+    }
+
+    fn read_key(&mut self) -> io::Result<Key> {
+        loop {
+            let mut record = unsafe { std::mem::zeroed::<INPUT_RECORD>() };
+            let mut read = 0;
+            if unsafe { ReadConsoleInputW(self.handle(), &mut record, 1, &mut read) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if read == 0 || u32::from(record.EventType) != KEY_EVENT {
+                continue;
+            }
+
+            let event = unsafe { record.Event.KeyEvent };
+            if event.bKeyDown == 0 {
+                continue;
+            }
+
+            match event.wVirtualKeyCode {
+                VK_UP => return Ok(Key::Up),
+                VK_DOWN => return Ok(Key::Down),
+                _ => {}
+            }
+
+            let char_code = unsafe { event.uChar.UnicodeChar };
+            match char::from_u32(u32::from(char_code)) {
+                Some('q' | 'Q') => return Ok(Key::Quit),
+                _ => return Ok(Key::Other),
+            }
+        }
+    }
+
+    fn handle(&self) -> HANDLE {
+        self.tty.as_raw_handle() as HANDLE
+    }
+}
+
+#[cfg(windows)]
+impl Drop for RawTty {
+    fn drop(&mut self) {
+        let _ = unsafe { SetConsoleMode(self.handle(), self.original) };
+    }
 }
 
 #[cfg(unix)]
