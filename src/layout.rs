@@ -242,6 +242,10 @@ fn build_tabular_interactive_output(
         suffix.extend_from_slice(line.bytes);
     }
 
+    if mode == Mode::Aligned {
+        normalize_aligned_interactive_output(&mut prefix, &mut rows);
+    }
+
     Ok(InteractiveOutput {
         prefix,
         rows,
@@ -332,12 +336,118 @@ fn is_record_start(line: Line<'_>) -> bool {
     line.content_without_newline().starts_with(b"-[ RECORD")
 }
 
-fn write_aligned_placeholder(out: &mut Vec<u8>, width: usize) {
+fn write_aligned_placeholder(out: &mut Vec<u8>, _width: usize) {
     let placeholder = b"[img]";
     out.extend_from_slice(placeholder);
-    if width > placeholder.len() {
-        out.extend(std::iter::repeat_n(b' ', width - placeholder.len()));
+}
+
+fn normalize_aligned_interactive_output(prefix: &mut Vec<u8>, rows: &mut [Vec<u8>]) {
+    let Some((separator_start, separator_end)) = last_aligned_separator_range(prefix) else {
+        return;
+    };
+    let Some((header_start, header_end)) = previous_line_range(prefix, separator_start) else {
+        return;
+    };
+
+    let header_text = trimmed_line_content(&prefix[header_start..header_end]).to_vec();
+    let mut width = header_text.len().max(b"[img]".len());
+
+    for row in rows.iter() {
+        let Some((row_start, row_end)) = first_line_range(row) else {
+            continue;
+        };
+        if !is_rewritten_aligned_image_line(&row[row_start..row_end]) {
+            continue;
+        }
+        width = width.max(trimmed_line_content(&row[row_start..row_end]).len());
     }
+
+    let mut normalized_prefix = Vec::with_capacity(prefix.len());
+    normalized_prefix.extend_from_slice(&prefix[..header_start]);
+    write_aligned_cell_line(&mut normalized_prefix, &header_text, width, true);
+    normalized_prefix.extend(std::iter::repeat_n(b'-', width + 2));
+    normalized_prefix.push(b'\n');
+    normalized_prefix.extend_from_slice(&prefix[separator_end..]);
+    *prefix = normalized_prefix;
+
+    for row in rows {
+        let Some((row_start, row_end)) = first_line_range(row) else {
+            continue;
+        };
+        if !is_rewritten_aligned_image_line(&row[row_start..row_end]) {
+            continue;
+        }
+        let text = trimmed_line_content(&row[row_start..row_end]).to_vec();
+        let has_newline = row[row_start..row_end].ends_with(b"\n");
+        let mut normalized_row = Vec::with_capacity(row.len());
+        normalized_row.extend_from_slice(&row[..row_start]);
+        write_aligned_cell_line(&mut normalized_row, &text, width, has_newline);
+        normalized_row.extend_from_slice(&row[row_end..]);
+        *row = normalized_row;
+    }
+}
+
+fn is_rewritten_aligned_image_line(line: &[u8]) -> bool {
+    trimmed_line_content(line) == b"[img]"
+}
+
+fn write_aligned_cell_line(out: &mut Vec<u8>, text: &[u8], width: usize, newline: bool) {
+    out.push(b' ');
+    out.extend_from_slice(text);
+    if width > text.len() {
+        out.extend(std::iter::repeat_n(b' ', width - text.len()));
+    }
+    out.push(b' ');
+    if newline {
+        out.push(b'\n');
+    }
+}
+
+fn last_aligned_separator_range(bytes: &[u8]) -> Option<(usize, usize)> {
+    line_ranges(bytes)
+        .into_iter()
+        .rev()
+        .find(|&(start, end)| is_aligned_separator_line(&bytes[start..end]))
+}
+
+fn is_aligned_separator_line(line: &[u8]) -> bool {
+    let content = strip_line_newline(line).trim_ascii();
+    !content.is_empty()
+        && content.contains(&b'-')
+        && content
+            .iter()
+            .all(|byte| matches!(byte, b'-' | b'+' | b' '))
+}
+
+fn previous_line_range(bytes: &[u8], end_before: usize) -> Option<(usize, usize)> {
+    line_ranges(&bytes[..end_before]).into_iter().last()
+}
+
+fn first_line_range(bytes: &[u8]) -> Option<(usize, usize)> {
+    line_ranges(bytes).into_iter().next()
+}
+
+fn line_ranges(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (index, byte) in bytes.iter().enumerate() {
+        if *byte == b'\n' {
+            ranges.push((start, index + 1));
+            start = index + 1;
+        }
+    }
+    if start < bytes.len() {
+        ranges.push((start, bytes.len()));
+    }
+    ranges
+}
+
+fn trimmed_line_content(line: &[u8]) -> &[u8] {
+    strip_line_newline(line).trim_ascii()
+}
+
+fn strip_line_newline(line: &[u8]) -> &[u8] {
+    line.strip_suffix(b"\n").unwrap_or(line)
 }
 
 #[derive(Clone, Copy)]
@@ -472,6 +582,38 @@ mod tests {
             .unwrap()
             .contains(" text row \n"));
         assert_eq!(interactive.bytes(), processed.bytes);
+    }
+
+    #[test]
+    fn preserves_spaces_in_non_image_aligned_rows() {
+        let input = format!(
+            " thumbnail \n-----------\n {} \n   x   \n {} \n(3 rows)\n",
+            png_hex(),
+            png_hex()
+        );
+        let processed = process(input.as_bytes(), Protocol::Kitty, &config()).unwrap();
+        let interactive = processed.interactive.as_ref().unwrap();
+
+        assert_eq!(interactive.rows.len(), 3);
+        assert_eq!(interactive.rows[1], b"   x   \n");
+        assert_eq!(interactive.bytes(), processed.bytes);
+    }
+
+    #[test]
+    fn normalizes_aligned_separator_to_rewritten_width() {
+        let mut long_png = png_hex();
+        long_png.push_str("00000000000000000000000000000000");
+        let input = format!(
+            " img                                      \n------------------------------------------\n {} \n(1 row)\n",
+            long_png
+        );
+        let processed = process(input.as_bytes(), Protocol::Kitty, &config()).unwrap();
+        let interactive = processed.interactive.as_ref().unwrap();
+
+        assert_eq!(interactive.prefix, b" img   \n-------\n");
+        assert!(String::from_utf8(interactive.rows[0].clone())
+            .unwrap()
+            .starts_with(" [img] \n"));
     }
 
     #[test]
